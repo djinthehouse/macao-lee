@@ -1147,6 +1147,14 @@ ruby rt{color:var(--ink-2)}
 
 :focus-visible{outline-color:var(--du-blue-line)}
 input:focus-visible,textarea:focus-visible{outline:none}
+
+/* ---- 로그인 유지 안내 ---- */
+.du-keep{margin:14px 2px 0;font-size:13px;line-height:1.55;color:var(--ink-3);word-break:keep-all}
+.du-inapp{margin:0 0 14px;padding:12px 14px;border-radius:14px;background:var(--du-blue-soft);border:2px solid var(--du-blue-line);
+  color:var(--ink);font-size:13.5px;line-height:1.55;word-break:keep-all}
+.du-inapp span{display:block;margin-top:4px;color:var(--ink-2)}
+.du-inapp-go{display:block;margin-top:10px;border:0;border-radius:12px;padding:10px 14px;background:var(--du-blue);color:#fff;
+  font-weight:900;box-shadow:0 3px 0 var(--du-blue-d)}
 </style>
 </head>
 <body>
@@ -4087,7 +4095,7 @@ function speak(text, slow){
     const go=()=>{
       try{
         const u=new SpeechSynthesisUtterance(text);
-        u.lang='zh-CN'; u.rate= slow ? .42 : .8; u.pitch=1;
+        u.lang='zh-CN'; u.rate= slow ? .6 : .85; u.pitch=1;
         if(ZH_VOICE) u.voice=ZH_VOICE;
         u.onend=u.onerror=()=>{ TTS_REAL=Math.max(0,TTS_REAL-1); };
         TTS_REAL++; TTS_AT=Date.now();
@@ -4554,8 +4562,8 @@ function renderAuth(){
 }
 
 const SYNC_TEXT = {
-  loading:['연결 중…',''], off:['',''], out:['진도가 이 브라우저에만 저장돼요','로그인'],
-  sync:['진도를 맞추는 중…',''], in:['진도가 저장되고 있어요',''], err:['서버에 닿지 못했어요 — 학습은 그대로 계속돼요','다시 시도']
+  loading:['연결 중…',''], restore:['로그인 정보를 확인하는 중…',''], off:['',''], out:['진도가 이 브라우저에만 저장돼요','로그인'],
+  sync:['진도를 맞추는 중…',''], in:['진도가 저장되고 있어요 · 이 기기에서 로그인 유지 중',''], err:['서버에 닿지 못했어요 — 학습은 그대로 계속돼요','다시 시도']
 };
 
 
@@ -4671,10 +4679,15 @@ const CLOUD = {
         import(SDK+'firebase-firestore.js')
       ]);
       const app = initializeApp(FB_CFG);
-      this.api = { auth: auth.getAuth(app), fs: fs.getFirestore(app), a: auth, f: fs };
+      let au=null;
+      try{ au = auth.initializeAuth(app, { persistence: [auth.indexedDBLocalPersistence, auth.browserLocalPersistence] }); }
+      catch(_){ au = auth.getAuth(app); }
+      this.api = { auth: au, fs: fs.getFirestore(app), a: auth, f: fs };
       this.ready = true;
-      this.set('out');
+      this.set('restore');
+      const giveUp = setTimeout(()=>{ if(this.status==='restore') this.set('out'); }, 8000);
       this.api.a.onAuthStateChanged(this.api.auth, async (u)=>{
+        clearTimeout(giveUp);
         this.user = u;
         if(u){ await this.pull(); } else { this.set('out'); }
       });
@@ -5804,6 +5817,76 @@ optTap=function(e, b){
   if(e && e.kind==='mcq' && canSpeak() && /[가-힣]/.test(b.dataset.v||'')){ speakKo(b.dataset.v); bump(); return; }
   sfx('tap');
 };
+
+
+/* ================= 로그인 유지 ================= */
+const DU_LASTID='du-lastid';
+function duInApp(){
+  const ua=navigator.userAgent||'';
+  if(/KAKAOTALK/i.test(ua)) return {name:'카카오톡', open:()=>{ location.href='kakaotalk://web/openExternal?url='+encodeURIComponent(location.href); }};
+  if(/NAVER\(inapp|NAVER\//i.test(ua)) return {name:'네이버 앱', open:null};
+  if(/Instagram|FBAN|FBAV|Line\/|DaumApps|everytimeApp|BAND\//i.test(ua)) return {name:'앱 안 브라우저', open:null};
+  return null;
+}
+function duInAppHTML(){
+  const ia=duInApp(); if(!ia) return '';
+  const isAndroid=/Android/i.test(navigator.userAgent||'');
+  return `<div class="du-inapp"><b>${esc(ia.name)} 안에서 열려 있어요.</b> 여기서는 로그인이 자주 풀릴 수 있어요.
+    ${ia.open||isAndroid ? '<button type="button" class="du-inapp-go" id="duExt">크롬·사파리로 열기</button>'
+      : '<span>오른쪽 위 메뉴(⋯)에서 <b>“다른 브라우저로 열기 / Safari로 열기”</b>를 눌러 주세요.</span>'}</div>`;
+}
+function duInAppBind(root){
+  const b=(root||document).querySelector('#duExt'); if(!b) return;
+  b.onclick=()=>{ const ia=duInApp();
+    if(ia && ia.open) return ia.open();
+    location.href='intent://'+location.host+location.pathname+location.search+'#Intent;scheme=https;package=com.android.chrome;end'; };
+}
+function duRemember(id, pw){
+  try{ localStorage.setItem(DU_LASTID, id); }catch(_){}
+  try{ if(window.PasswordCredential && navigator.credentials && navigator.credentials.store)
+    navigator.credentials.store(new PasswordCredential({id, password:pw, name:id})).catch(()=>{}); }catch(_){}
+}
+const _duSignIn=CLOUD.signIn.bind(CLOUD), _duSignUp=CLOUD.signUp.bind(CLOUD);
+CLOUD.signIn=async function(id, pw){ await _duSignIn(id, pw); duRemember(String(id).trim().toLowerCase(), pw); };
+CLOUD.signUp=async function(id, pw){ await _duSignUp(id, pw); duRemember(String(id).trim().toLowerCase(), pw); };
+
+/* 로그인 화면: 비밀번호 관리자가 알아보도록 form 으로 감싸고, 지난번 아이디를 채워 둡니다 */
+const _duRenderAuth=renderAuth;
+renderAuth=function(){
+  const r=_duRenderAuth.apply(this, arguments);
+  try{
+    const wrap=app.querySelector('.gwrap'); if(!wrap || wrap.closest('form')) return r;
+    const f=document.createElement('form'); f.className='du-authform'; f.setAttribute('autocomplete','on');
+    f.onsubmit=ev=>{ ev.preventDefault(); const g=$('#auGo'); if(g && !g.disabled) g.click(); };
+    wrap.parentNode.insertBefore(f, wrap); f.appendChild(wrap);
+    f.querySelectorAll('button').forEach(b=>b.type='button');
+    const idEl=$('#auId'), pwEl=$('#auPw');
+    if(idEl){ idEl.name='username'; idEl.id='auId';
+      let last=''; try{ last=localStorage.getItem(DU_LASTID)||''; }catch(_){}
+      if(last && !idEl.value){ idEl.value=last; if(pwEl && AUTH_MODE!=='up') setTimeout(()=>{ try{ pwEl.focus(); }catch(_){} }, 60); } }
+    if(pwEl) pwEl.name='password';
+    const top=app.querySelector('.gtop');
+    if(top){
+      top.insertAdjacentHTML('beforeend', `<div class="du-keep">한 번 로그인하면 <b>로그아웃하기 전까지 이 기기에서 계속 로그인</b>돼요.</div>`);
+      const ia=duInAppHTML(); if(ia){ top.insertAdjacentHTML('afterbegin', ia); duInAppBind(top); }
+    }
+  }catch(err){ console.error(err); }
+  return r;
+};
+
+/* 프로필 탭 계정 줄: 로그인 확인 중에는 '로그인' 버튼을 띄우지 않습니다 + 앱 안 브라우저 안내 */
+function duAcctDeco(){
+  const pr=app.querySelector('.du-profile'); if(!pr) return;
+  if(CLOUD.status==='restore'){ const nm=pr.querySelector('.acctrow .nm'); if(nm) nm.textContent='로그인 확인 중'; }
+  const ia=duInAppHTML();
+  if(ia && !pr.querySelector('.du-inapp')){
+    const row=pr.querySelector('.acctrow');
+    if(row) row.insertAdjacentHTML('afterend', ia); else pr.insertAdjacentHTML('afterbegin', ia);
+    duInAppBind(pr);
+  }
+}
+const _duRenderHome3=renderHome;
+renderHome=function(){ const r=_duRenderHome3.apply(this, arguments); try{ duAcctDeco(); }catch(_){} return r; };
 
 /* ---------------- 10. START ---------------- */
 CLOUD.on(()=>{ if(document.querySelector('.path')) renderHome(); });
